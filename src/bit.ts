@@ -120,16 +120,16 @@ export function toggle(bitmask: number, bit: number) {
 /**
  * returns the number of trailing zeros in the binary representation of 'n'
  */
-export function trailing_zeros(n: number): number {
+export function trailing_zeros(n: number, size: 8 | 16 | 32 = 32): number {
     if (n === 0) {
-        return 32
+        return size
     } else {
         let i = -1;
         let count = 0;
         while (true) {
             i++;
             if (check(n, i)) {
-                break;
+                break
             }
             count++;
         }

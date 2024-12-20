@@ -81,9 +81,9 @@ export class FixedBitSet {
         return new Difference(a.ones(), b);
     }
 
-    static symmetric_difference(a: FixedBitSet, b: FixedBitSet) {
-        return a.difference(b).chain(b.difference(a))
-    }
+    // static symmetric_difference(a: FixedBitSet, b: FixedBitSet) {
+    //     return a.difference(b).chain(b.difference(a))
+    // }
 
     static batch_count_ones(blocks: Iterator<number>) {
         return blocks.map(x => count_ones(x)).sum();
@@ -151,21 +151,50 @@ export class FixedBitSet {
         return new FixedBitSet([...this.#data], this.len())
     }
 
+    len(): number {
+        return this.#length;
+    }
+
+    block_len() {
+        let [blocks, rem] = div_rem(this.#length, BITS)
+        blocks += Number(rem > 0)
+        return blocks;
+    }
+
     /**
      * Resizes the bitset to the given amount of bits.
      * Does nothing if `bits` is less than current amount of bits in the bitset.
      */
     grow(bits: number) {
-        if (bits > this.#length) {
-            let [blocks, rem] = div_rem(bits, BITS);
-            blocks += Number(rem > 0);
-            this.#length = bits;
-            const len = this.#data.length;
-            this.#data.length = bits
-            for (let i = len; i < bits; i++) {
-                this.#data[i] = 0;
-            }
+        function do_grow(fbs: FixedBitSet, bits: number) {
+            fbs.#grow_inner(bits, 0)
         }
+        if (bits > this.#length) {
+            do_grow(this, bits)
+
+        }
+        // if (bits > this.#length) {
+        //     let [blocks, rem] = div_rem(bits, BITS);
+        //     blocks += Number(rem > 0);
+        //     this.#length = bits;
+        //     const len = this.#data.length;
+        //     this.#data.length = bits
+        //     for (let i = len; i < bits; i++) {
+        //         this.#data[i] = 0;
+
+        //     }
+
+        // }
+
+    }
+
+    #grow_inner(bits: number, value: any) {
+        const data = structuredClone(this.#data);
+        let [blocks, rem] = div_rem(bits, BITS)
+        blocks += Number(rem > 0);
+        resize(data, blocks, value);
+        this.#data = data;
+        this.#length = bits;
     }
 
     /**
@@ -175,10 +204,6 @@ export class FixedBitSet {
     grow_insert(bits: number) {
         this.grow(bits + 1);
         this.insert_unchecked(bits);
-    }
-
-    len(): number {
-        return this.#length;
     }
 
     /**
@@ -297,7 +322,7 @@ export class FixedBitSet {
      * @summary Enable `bit`
      */
     insert(bit: number) {
-        assert(bit < this.#length, `Cannot insert bit ${bit} as it is greater than FixedBitSet length ${this.#length}`);
+        assert(bit < this.#length, `Cannot insert bit ${bit} as it is >= than FixedBitSet length ${this.#length}`);
         this.insert_unchecked(bit);
 
     }
@@ -406,6 +431,7 @@ export class FixedBitSet {
         }
     }
 
+    // TODO: optimize insert_range(), toggle_range(), and remove_range() by using blocks to iterate instead of brute force all of range
     /**
      * `Range` start is inclusive and end is exclusive.
      * `insert_range()` sets all the bits in the range to 1 
@@ -414,11 +440,12 @@ export class FixedBitSet {
         for (const [block, mask] of new Masks(range, this.#length)) {
             this.#data[block] |= mask;
         }
-
-
     }
 
     remove_range(range: Range = new Range(0, this.#length)) {
+        // for (let i = range.start; i < range.end; i++) {
+        //     this.remove_unchecked(i);
+        // }
         for (const [block, mask] of new Masks(range, this.#length)) {
             this.#data[block] &= ~mask;
         }
@@ -435,6 +462,10 @@ export class FixedBitSet {
     * console.log(fbs.ones().collect())// [0, 1, 2, 3, 8, 9]
     */
     toggle_range(range: Range = new Range(0, this.#length)) {
+        // for (let i = range.start; i < range.end; i++) {
+        //     this.toggle_unchecked(i);
+        // }
+
         for (const [block, mask] of new Masks(range, this.#length)) {
             this.#data[block] ^= mask;
         }
@@ -465,30 +496,29 @@ export class FixedBitSet {
                 iter([])
             );
         }
-
     }
 
-    // zeroes() {
-    //     const opt = split_first(this.as_slice());
-    //     if (opt) {
-    //         const [firstblock, rem] = opt;
+    zeroes() {
+        const opt = split_first(this.as_slice());
+        if (opt) {
+            const [firstblock, rem] = opt;
 
-    //         return new Zeroes(
-    //             ~firstblock,
-    //             0,
-    //             this.#length,
-    //             iter(rem)
-    //         )
+            return new Zeroes(
+                ~firstblock,
+                0,
+                this.#length,
+                iter(rem)
+            )
 
-    //     } else {
-    //         return new Zeroes(
-    //             ~0,
-    //             0,
-    //             this.#length,
-    //             iter([])
-    //         );
-    //     }
-    // }
+        } else {
+            return new Zeroes(
+                ~0,
+                0,
+                this.#length,
+                iter([])
+            );
+        }
+    }
 
     intersection(other: FixedBitSet): DoubleEndedIterator<number> {
         return new Intersection(this.ones(), other)
@@ -544,7 +574,7 @@ export class FixedBitSet {
 
 
     symmetric_difference(other: FixedBitSet) {
-        return FixedBitSet.symmetric_difference(this, other);
+        return this.difference(other).chain(other.difference(this))
     }
 
     // in-place symmetric difference of two 'FixedBitSet's;
@@ -592,10 +622,6 @@ export class FixedBitSet {
         return this.format('#b')
     }
 
-    #set_block(block: number, value: number) {
-        this.#data[block] = value;
-    }
-
     [Symbol.iterator]() {
         return this.ones();
     }
@@ -620,9 +646,8 @@ class Difference extends DoubleEndedIterator<number> {
     }
 
     override next(): IteratorResult<number> {
-        const n = this.#iter.next();
-        return (!n.done && !this.#other.contains(n.value)) ?
-            item(n.value) : done();
+        const f = this.#iter.find(nxt => !this.#other.contains(nxt));
+        return is_some(f) ? item(f) : done();
     }
 
     next_back(): IteratorResult<number, any> {
@@ -716,7 +741,6 @@ class Ones extends DoubleEndedIterator<number> {
             if (!block.done) {
                 this.#bitset_front = block.value;
                 this.#block_idx_front += BITS;
-
             } else {
                 // check back
                 if (this.#bitset_back !== 0) {
@@ -724,16 +748,20 @@ class Ones extends DoubleEndedIterator<number> {
                     this.#bitset_front = 0;
                     const [bitset_back, position] = this.#last_positive_bit_and_unset(this.#bitset_back)
                     this.#bitset_back = bitset_back
+                    return item(this.#block_idx_back + position)
 
-                    return item(this.#block_idx_back * position)
                 } else {
                     return done();
+
                 }
+
             }
+
         }
         const [bitset_front, position] = this.#last_positive_bit_and_unset(this.#bitset_front)
         this.#bitset_front = bitset_front;
         return item(this.#block_idx_front + position)
+
     }
 
     override next_back(): IteratorResult<number> {
@@ -773,6 +801,7 @@ class Ones extends DoubleEndedIterator<number> {
         const mask = ~((1) << (BITS - bit_idx - 1))
         return [n &= mask, bit_idx];
     }
+
 }
 
 class Zeroes extends Iterator<number> {
@@ -797,14 +826,18 @@ class Zeroes extends Iterator<number> {
         while (this.#bitset === 0) {
             const n = this.#remaining_blocks.next();
             if (n.done) return done();
-
+            // TODO: this is a workaround for ~n.value
             this.#bitset = ~n.value;
+            // this.#bitset = Math.min(~n.value, -1);
+            // this.#bitset = -1;
             this.#block_idx += BITS;
         }
 
-        const t = this.#bitset & u32.wrapping_sub(0b00000000, this.#bitset);
+        const t = this.#bitset & u32.wrapping_sub(0, this.#bitset);
+
         const r = trailing_zeros(this.#bitset);
         this.#bitset ^= t;
+
         const bit = this.#block_idx + r;
         if (bit < this.#len) {
             return item(bit)
@@ -812,8 +845,8 @@ class Zeroes extends Iterator<number> {
 
         return done();
     }
-}
 
+}
 
 class Masks extends Iterator<[number, number]> {
     #first_block: number;
@@ -834,7 +867,8 @@ class Masks extends Iterator<[number, number]> {
         this.#first_block = first_block;
         this.#first_mask = u32.MAX << first_rem;
         this.#last_block = last_block;
-        this.#last_mask = Math.floor(u32.MAX / 2) >> (BITS - last_rem - 1)
+        // this.#last_mask = Math.floor(u32.MAX / 2) >> (BITS - last_rem - 1)
+        this.#last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem - 1)
     }
 
     into_iter(): Iterator<[number, number]> {
