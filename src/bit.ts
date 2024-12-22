@@ -137,15 +137,14 @@ export function trailing_zeros(n: number, size: 8 | 16 | 32 = 32): number {
     }
 }
 
-export function count_ones(n: number) {
+export function count_ones(i: number) {
     let count = 0;
-    let mask = 1;
-    for (let i = 0; i < 32; i++) {
-        if ((mask & n) !== 0) {
-            count++;
-        }
-        mask <<= 1;
-    }
+    i = i - ((i >> 1) & 0x55555555);
+    i = (i & 0x33333333) + ((i >> 2) & 0x33333333);
+    i = (i + (i >> 4)) & 0x0f0f0f0f;
+    i = i + (i >> 8);
+    i = i + (i >> 16);
+    count += i & 0x3f;
     return count;
 }
 

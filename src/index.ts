@@ -1,8 +1,8 @@
-import { iter, range, done, Iterator, Range, type IterInputType, item, DoubleEndedIterator } from 'joshkaposh-iterator'
-import { assert, resize } from 'joshkaposh-iterator/src/util.js';
-import { is_some, Option } from 'joshkaposh-option'
-import { count_ones, trailing_zeros } from "./bit.js";
-import { u32 } from "./Intrinsics/index.js";
+import { done, DoubleEndedIterator, item, iter, Iterator, IterInputType } from "joshkaposh-iterator";
+import { assert } from "joshkaposh-iterator/src/util";
+import { count_ones, trailing_zeros } from "./bit";
+import { u32 } from "./Intrinsics";
+import { is_some, Option } from "joshkaposh-option";
 
 const U32_COUNT = 4;
 const BITS = U32_COUNT * 8 //* 32
@@ -12,90 +12,453 @@ function div_rem(x: number, d: number): [number, number] {
 }
 
 export class FixedBitSet {
-    #data: number[];
+    #blocks: Uint32Array;
     #length: number;
-
-    constructor(data: number[] = [], length: number = 0) {
-        this.#data = data;
+    constructor(blocks = new Uint32Array(), length = 0) {
+        this.#blocks = blocks;
         this.#length = length;
+    }
+
+    static with_capacity(bits: number) {
+        let [blocks, rem] = div_rem(bits, BITS)
+        blocks += Number(rem > 0);
+        const arr = Uint32Array.from(Array.from({ length: blocks }, () => 0))
+        return new FixedBitSet(arr, bits);
+    }
+
+    static with_capacity_and_blocks(bits: number, blocks: IterInputType<number>) {
+        const bitset = this.with_capacity(bits);
+        for (const [subblock, value] of iter(bitset.as_slice()).zip(blocks)) {
+            // @ts-expect-error
+            bitset.#set_unchecked(subblock, value)
+        }
+        return bitset;
+    }
+
+    static from_blocks_and_len(blocks: number[], length: number) {
+        return new FixedBitSet(Uint32Array.from(blocks), length);
     }
 
     static default() {
         return FixedBitSet.with_capacity(0);
     }
 
-    static with_capacity(bits: number) {
+    clone() {
+        return new FixedBitSet(structuredClone(this.#blocks as Uint32Array<ArrayBuffer>), this.#length)
+    }
+
+    as_slice() {
+        return this.#blocks;
+    }
+
+    /**
+     * Resizes the bitset to the given amount of bits.
+     * Does nothing if `bits` is less than current amount of bits in the bitset.
+     */
+    grow(bits: number) {
+        function do_grow(fbs: FixedBitSet, bits: number) {
+            fbs.#grow_inner(bits)
+        }
+        if (bits > this.#length) {
+            do_grow(this, bits)
+
+        }
+    }
+
+    grow_insert(bits: number) {
+        this.grow(bits + 1);
+        const [blocks, rem] = div_rem(bits, BITS)
+        let b = this.#get_unchecked(blocks);
+        b |= 1 << rem;
+        this.#set_unchecked(blocks, b)
+    }
+
+    #grow_inner(bits: number) {
         let [blocks, rem] = div_rem(bits, BITS);
-        blocks += Number(rem > 0) * 1
-        return new FixedBitSet(Array.from({ length: blocks }, () => 0), bits)
-    }
-
-    static with_capacity_and_blocks(bits: number, blocks: Iterable<number>) {
-        let [n_blocks, rem] = div_rem(bits, BITS)
-        n_blocks += Number(rem > 0) * 1
-        const data = Array.from(blocks);
-        if (data.length !== n_blocks) {
-            resize(data, n_blocks, 0);
+        blocks += Number(rem > 0);
+        if (this.#blocks.length < blocks) {
+            const buf = new ArrayBuffer(this.#blocks.length, { maxByteLength: BITS * blocks })
+            buf.resize(blocks * U32_COUNT);
+            const arr = new Uint32Array(buf);
+            arr.set(this.#blocks);
+            this.#blocks = arr;
+            this.#length = bits;
         }
-        const end = data.length * 32;
-        for (const [block, mask] of new Masks(range(bits, end), end)) {
-            data[block] &= Number(~mask);
+    }
+
+    len() {
+        return this.#length
+    }
+
+    block_len(): number {
+        let [blocks, rem] = div_rem(this.#length, BITS)
+        return blocks += Number(rem > 0);
+    }
+
+    /**
+     * Checks if the bitset is empty.
+     * If you want to check is all the bits are unset, use is_clear()
+     */
+    is_empty() {
+        return this.#length === 0
+    }
+
+    /**
+     * Checks if every bit is unset
+     */
+    is_clear() {
+        for (let i = 0; i < this.#blocks.length; i++) {
+            if (this.#blocks[i] !== 0) {
+                return false
+            }
         }
-        return new FixedBitSet(data, bits)
+        return true;
     }
 
-    static from(src: IterInputType<number>) {
-        const fb = FixedBitSet.with_capacity(0);
-        fb.extend(src);
-        return fb;
+    /**
+     * Checks if every bit is set
+     */
+    is_full() {
+        return this.contains_all_in_range();
     }
 
-    static and(a: FixedBitSet, b: FixedBitSet): FixedBitSet {
-        const [short, long] = a.len() <= b.len() ?
-            [a.#data, b.#data] :
-            [b.#data, a.#data]
-        const data = Array.from(short, (k, i) => k & long[i])
-        const len = Math.min(a.len(), b.len())
-        return new FixedBitSet(data, len);
+    clear() {
+        this.#blocks.fill(0, 0, this.#blocks.length);
     }
 
-    static or(a: FixedBitSet, b: FixedBitSet): FixedBitSet {
-        const [short, long] = a.len() <= b.len() ?
-            [a.#data, b.#data] :
-            [b.#data, a.#data]
-        const data = Array.from(short, (k, i) => k | long[i])
-        const len = Math.max(a.len(), b.len())
-        return new FixedBitSet(data, len);
+    count_ones(from = 0, to = this.#length) {
+        return this.#batch_count_ones(from, to);
     }
 
-    static xor(a: FixedBitSet, b: FixedBitSet): FixedBitSet {
-        const [short, long] = a.len() <= b.len() ?
-            [a.#data, b.#data] :
-            [b.#data, a.#data]
-        const data = Array.from(short, (k, i) => k ^ long[i])
-        const len = Math.max(a.len(), b.len())
-        return new FixedBitSet(data, len);
+    count_zeroes(from = 0, to = this.#length) {
+        return this.#batch_count_zeroes(from, to);
     }
 
-    static difference(a: FixedBitSet, b: FixedBitSet) {
-        return new Difference(a.ones(), b);
+    insert_range(from = 0, to = this.#length) {
+        const start = from;
+        const end = to;
+        assert(start <= end && end <= this.#length, `Invalid range ${start}..${end} for a fixedbitset of size ${this.#length}`)
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+            let b = this.#get_unchecked(block);
+            b |= mask;
+            this.#set_unchecked(block, b);
+        }
     }
 
-    // static symmetric_difference(a: FixedBitSet, b: FixedBitSet) {
-    //     return a.difference(b).chain(b.difference(a))
-    // }
+    remove_range(from = 0, to = this.#length) {
+        const start = from;
+        const end = to;
+        assert(start <= end && end <= this.#length, `Invalid range ${start}..${end} for a fixedbitset of size ${this.#length}`)
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
 
-    static batch_count_ones(blocks: Iterator<number>) {
-        return blocks.map(x => count_ones(x)).sum();
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+            let b = this.#get_unchecked(block);
+            b &= ~mask;
+            this.#set_unchecked(block, b);
+
+        }
+    }
+
+    toggle_range(from = 0, to = this.#length) {
+        const start = from;
+        const end = to;
+        assert(start <= end && end <= this.#length, `Invalid range ${start}..${end} for a fixedbitset of size ${this.#length}`)
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+            let b = this.#get_unchecked(block);
+            b ^= mask;
+            this.#set_unchecked(block, b);
+        }
+    }
+
+    set_range(from: number, to: number, enabled: boolean | 0 | 1) {
+        if (enabled) {
+            this.insert_range(from, to);
+        } else {
+            this.remove_range(from, to);
+        }
+    }
+
+    insert(bit: number) {
+        assert(bit < this.#length);
+        this.insert_unchecked(bit);
+    }
+
+    insert_unchecked(bit: number) {
+        const [block, i] = div_rem(bit, BITS)
+        this.#blocks[block] |= 1 << i;
+    }
+
+    contains(bit: number) {
+        if (bit < this.#length) {
+            return this.contains_unchecked(bit)
+        }
+        return false;
+    }
+
+    contains_unchecked(bit: number) {
+        const [block, i] = div_rem(bit, BITS)
+        return (this.#get_unchecked(block) & (1 << i)) !== 0;
+    }
+
+    contains_any_in_range(from = 0, to = this.#length) {
+        const start = from;
+        const end = to;
+        assert(start <= end && end <= this.#length, `Invalid range ${start}..${end} for a fixedbitset of size ${this.#length}`)
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+            let b = this.#get_unchecked(block);
+            if ((b & mask) !== 0) {
+                return true
+            }
+        }
+
+        return false;
+    }
+
+    contains_all_in_range(from = 0, to = this.#length) {
+        const start = from;
+        const end = to;
+        assert(start <= end && end <= this.#length, `Invalid range ${start}..${end} for a fixedbitset of size ${this.#length}`)
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+            let b = this.#get_unchecked(block);
+            if ((b & mask) !== mask) {
+                return false
+            }
+        }
+        return true;
+    }
+
+    remove(bit: number) {
+        assert(bit < this.#length)
+        this.remove_unchecked(bit);
+    }
+
+    remove_unchecked(bit: number) {
+        const [block, i] = div_rem(bit, BITS)
+        this.#set_unchecked(block, block & ~(1 << i))
+    }
+
+    put(bit: number): boolean {
+        assert(bit < this.#length);
+        return this.put_unchecked(bit);
+    }
+
+    put_unchecked(bit: number): boolean {
+        const [block, i] = div_rem(bit, BITS)
+        let word = this.#get_unchecked(block);
+        const prev = (word & (1 << i)) !== 0;
+        word |= 1 << i;
+        this.#set_unchecked(block, word);
+        return prev;
+
+    }
+
+    toggle(bit: number) {
+        assert(bit < this.#length)
+        this.toggle_unchecked(bit)
+    }
+
+    toggle_unchecked(bit: number) {
+        const [block, i] = div_rem(bit, BITS);
+        let b = this.#get_unchecked(block);
+        b ^= 1 << i;
+        this.#set_unchecked(block, b)
+    }
+
+    set(bit: number, enabled: 0 | 1 | boolean) {
+        assert(bit < this.#length)
+        this.set_unchecked(bit, enabled);
+    }
+
+    set_unchecked(bit: number, enabled: 0 | 1 | boolean) {
+        const [block, i] = div_rem(bit, BITS)
+        let elt = this.#get_unchecked(block);
+        if (enabled) {
+            elt |= 1 << i;
+        } else {
+            elt &= ~(1 << i);
+        }
+        this.#set_unchecked(block, elt);
+    }
+
+    copy_bit(from: number, to: number) {
+        assert(to < this.#length)
+        const enabled = this.contains(from);
+        this.set_unchecked(to, enabled);
+    }
+
+    copy_bit_unchecked(from: number, to: number) {
+        const enabled = this.contains_unchecked(from);
+        this.set_unchecked(to, enabled);
+    }
+
+    ones() {
+        const first = split_first(this.as_slice());
+        if (first) {
+            const [first_block, rem_] = first;
+            const [last_block, rem] = split_last(rem_) ?? [0, rem_]
+            return new Ones(
+                first_block,
+                last_block,
+                0,
+                (1 + rem.length) * BITS,
+                iter(rem)
+            )
+        } else {
+            return new Ones(
+                0,
+                0,
+                0,
+                0,
+                iter([])
+            )
+        }
+    }
+
+    zeroes() {
+        const split = split_first(this.#blocks);
+        if (split) {
+            const [block, rem] = split;
+            return new Zeroes(
+                ~block,
+                0,
+                this.len(),
+                iter(rem)
+            )
+        } else {
+            return new Zeroes(
+                ~0,
+                0,
+                this.len(),
+                iter([])
+            )
+        }
     }
 
     and(other: FixedBitSet) {
         const l = other.len()
         for (let i = 0; i < l; i++) {
-            if (!is_some(this.#data[i])) {
+            if (!is_some(this.#blocks[i])) {
                 break;
             }
-            this.#data[i] &= other.#data[i]
+            this.#blocks[i] &= other.#blocks[i]
         }
     }
 
@@ -104,11 +467,11 @@ export class FixedBitSet {
      */
     or(other: FixedBitSet) {
         const len = other.len()
-        if (this.#data.length < len) {
+        if (this.#blocks.length < len) {
             this.grow(len);
         }
         for (let i = 0; i < len; i++) {
-            this.#data[i] |= other.#data[i]
+            this.#blocks[i] |= other.#blocks[i]
         }
     }
 
@@ -117,11 +480,11 @@ export class FixedBitSet {
      */
     xor(other: FixedBitSet) {
         const len = other.len()
-        if (this.#data.length < len) {
+        if (this.#blocks.length < len) {
             this.grow(len);
         }
         for (let i = 0; i < len; i++) {
-            this.#data[i] ^= other.#data[i]
+            this.#blocks[i] ^= other.#blocks[i]
         }
     }
 
@@ -129,8 +492,8 @@ export class FixedBitSet {
      * Checks if `this` and `other`'s bits exactly equal each other.
      */
     eq(other: FixedBitSet) {
-        for (let i = 0; i < this.#data.length; i++) {
-            if (!is_some(other.#data[i]) || this.#data[i] !== other.#data[i]) {
+        for (let i = 0; i < this.#blocks.length; i++) {
+            if (!is_some(other.#blocks[i]) || this.#blocks[i] !== other.#blocks[i]) {
                 return false;
             }
         }
@@ -147,378 +510,6 @@ export class FixedBitSet {
         }
     }
 
-    clone(): FixedBitSet {
-        return new FixedBitSet([...this.#data], this.len())
-    }
-
-    len(): number {
-        return this.#length;
-    }
-
-    block_len() {
-        let [blocks, rem] = div_rem(this.#length, BITS)
-        blocks += Number(rem > 0)
-        return blocks;
-    }
-
-    /**
-     * Resizes the bitset to the given amount of bits.
-     * Does nothing if `bits` is less than current amount of bits in the bitset.
-     */
-    grow(bits: number) {
-        function do_grow(fbs: FixedBitSet, bits: number) {
-            fbs.#grow_inner(bits, 0)
-        }
-        if (bits > this.#length) {
-            do_grow(this, bits)
-
-        }
-        // if (bits > this.#length) {
-        //     let [blocks, rem] = div_rem(bits, BITS);
-        //     blocks += Number(rem > 0);
-        //     this.#length = bits;
-        //     const len = this.#data.length;
-        //     this.#data.length = bits
-        //     for (let i = len; i < bits; i++) {
-        //         this.#data[i] = 0;
-
-        //     }
-
-        // }
-
-    }
-
-    #grow_inner(bits: number, value: any) {
-        const data = structuredClone(this.#data);
-        let [blocks, rem] = div_rem(bits, BITS)
-        blocks += Number(rem > 0);
-        resize(data, blocks, value);
-        this.#data = data;
-        this.#length = bits;
-    }
-
-    /**
-     * Grows to the bits and inserts.
-     * This is faster than calling .grow() then .insert()
-     */
-    grow_insert(bits: number) {
-        this.grow(bits + 1);
-        this.insert_unchecked(bits);
-    }
-
-    /**
-     * Checks if the bitset doesn't have any blocks.
-     */
-    is_empty(): boolean {
-        return this.#length === 0;
-    }
-
-    /**
-     *  Checks if the bitset doesn't have any ones.
-     *  This is the same as FixedBitSet.count_ones() === 0
-     */
-    is_clear(): boolean {
-        return this.count_ones() === 0;
-    }
-
-    /**
-     * Checks if the bitset contains all ones.
-     */
-    is_full(): boolean {
-        return this.contains_all_in_range();
-    }
-
-    /**
-     * Checks if the bitset contains all bits in the given range.
-     * @throws if the range extends past the end of the bitset.
-     */
-    contains_all_in_range(range: Range = new Range(0, this.#length)): boolean {
-        const masks = new Masks(range, this.#length)
-        for (const [block, mask] of masks) {
-            const b = this.#data[block];
-            if ((b & mask) !== mask) {
-                return false
-            }
-        }
-
-        return true
-    }
-
-    /**
-     * Checks if the bitset contains at least one set bit in the given range.
-     * 
-     * @throws if the range extends past the end of the bitset
-     */
-    contains_any_in_range(range: Range = new Range(0, this.#length)) {
-        const masks = new Masks(range, this.#length)
-        for (const [block, mask] of masks) {
-            const b = this.#data[block];
-            if ((block & mask) !== 0) {
-                return true
-            }
-        }
-        return false;
-    }
-
-    // maximum() {
-    //     const blocks = iter(this.#data)
-    //         .rev()
-    //         .enumerate()
-    //         .find(([_, block]) => {
-    //             return ~block !== 0;
-    //         })
-
-    //     if (!blocks) return
-    //     const [block_idx, block] = blocks;
-    //     let leading = 0;
-    //     let inner = 0;
-    //     // const [block_idx, block] = ret;
-    //     // const n = Math.floor(block / 4)
-
-    //     const max = this.#length * BITS;
-    //     return max - block_idx * BITS - inner - leading - 1;
-    // }
-
-    // minimum() {
-    // const ret = iter(this.#data)
-    //     .enumerate()
-    //     .find(([_, block]) => ~block)
-
-    // }
-
-    /**
-     * Clears all the bits of the bitset
-     */
-    clear() {
-        for (let i = 0; i < this.#data.length; i++) {
-            this.#data[i] = 0;
-        }
-    }
-
-    /**
-     * Check if a bit exists at the index given
-     */
-    contains(bit: number): boolean {
-        return bit < this.#length ? this.contains_unchecked(bit) : false;
-    }
-
-    contains_unchecked(bit: number): boolean {
-        const [block, i] = div_rem(bit, BITS)
-        return (this.get_unchecked(block) & (1 << i)) !== 0;
-    }
-
-    /**
-     * Gets the bit at the index given
-     */
-    get(bit: number): 0 | 1 {
-        return Number(this.contains(bit)) as 0 | 1;
-    }
-
-    get_unchecked(subblock: number): number {
-        return this.#data[subblock];
-    }
-
-    /**
-     * @summary Enable `bit`
-     */
-    insert(bit: number) {
-        assert(bit < this.#length, `Cannot insert bit ${bit} as it is >= than FixedBitSet length ${this.#length}`);
-        this.insert_unchecked(bit);
-
-    }
-
-    insert_unchecked(bit: number) {
-        const [block, i] = div_rem(bit, BITS);
-        this.#data[block] |= 1 << i;
-    }
-
-    remove(bit: number) {
-        assert(bit < this.#length);
-        this.remove_unchecked(bit);
-    }
-
-    remove_unchecked(bit: number) {
-        const [block, i] = div_rem(bit, BITS);
-        this.#data[block] &= ~(1 << i);
-    }
-
-    /**
-     * @summary Enable 'bit' and return its previous value
-     */
-    put(bit: number): boolean {
-        assert(bit < this.#length)
-        return this.put_unchecked(bit);
-    }
-
-    put_unchecked(bit: number) {
-        const [block, i] = div_rem(bit, BITS)
-        const word = this.#data[block];
-        const prev = (word & (1 << i)) !== 0;
-        this.#data[block] |= 1 << i;
-        return prev;
-    }
-
-    /**
-     * @summary Toggle `bit`.
-     * @description 
-     * Toggles `bit`
-     * 
-     *  If `bit` is set to 0,
-     *  it is set to 1.
-     *  If `bit` is set to 0,
-     *  it is set to 1 
-     */
-    toggle(bit: number) {
-        assert(bit < this.#length);
-        this.toggle_unchecked(bit);
-    }
-
-    toggle_unchecked(bit: number) {
-        const [block, i] = div_rem(bit, BITS)
-        this.#data[block] ^= 1 << i;
-    }
-
-    /**
-     * @description Sets a target bit to a target value.
-     * @example
-     * const f = FixedBitSet.with_capacity(0);
-     * 
-     * f.set(0, true)
-     * f.contains(0) // true
-     *
-     *  f.set(1, true)
-     * f.set(1, false)
-     * f.contains(1) // false
-    * 
-    */
-    set(bit: number, enabled: 0 | 1 | false | true) {
-        assert(bit < this.#length)
-        this.set_unchecked(bit, enabled)
-    }
-
-    set_unchecked(bit: number, enabled: 0 | 1 | false | true) {
-        const [block, i] = div_rem(bit, BITS);
-        if (enabled) {
-            this.#data[block] |= 1 << i
-        } else {
-            this.#data[block] &= ~(1 << i)
-        }
-    }
-
-    copy_bit(from: number, to: number) {
-        assert(to < this.#length);
-        this.copy_bit_unchecked(from, to)
-    }
-
-    copy_bit_unchecked(from: number, to: number) {
-        const enabled = this.contains_unchecked(from);
-        this.set_unchecked(to, enabled);
-    }
-
-    count_ones(range: Range = new Range(0, this.#length)): number {
-        return FixedBitSet.batch_count_ones(new Masks(range, this.#length).map(([block, mask]) => this.get_unchecked(block) & mask));
-    }
-
-    count_zeroes(range: Range = new Range(0, this.#length)) {
-        return FixedBitSet.batch_count_ones(new Masks(range, this.#length).map(([block, mask]) => ~this.get_unchecked(block) & mask));
-    }
-
-    set_range(range: Range = new Range(0, this.#length), enabled: 0 | 1 | false | true) {
-        if (enabled) {
-            this.insert_range(range);
-        } else {
-            this.remove_range(range);
-        }
-    }
-
-    // TODO: optimize insert_range(), toggle_range(), and remove_range() by using blocks to iterate instead of brute force all of range
-    /**
-     * `Range` start is inclusive and end is exclusive.
-     * `insert_range()` sets all the bits in the range to 1 
-    */
-    insert_range(range: Range = new Range(0, this.#length)) {
-        for (const [block, mask] of new Masks(range, this.#length)) {
-            this.#data[block] |= mask;
-        }
-    }
-
-    remove_range(range: Range = new Range(0, this.#length)) {
-        // for (let i = range.start; i < range.end; i++) {
-        //     this.remove_unchecked(i);
-        // }
-        for (const [block, mask] of new Masks(range, this.#length)) {
-            this.#data[block] &= ~mask;
-        }
-    }
-
-    /**
-     * `Range` start is inclusive and end is exclusive.
-     * `insert_range()` toggles all the bits in the range.
-     * @example
-    * const fbs = FixedBitSet.with_capacity(10);
-    * fbs.toggle_range();
-    * console.log(fbs.ones().collect())// [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    * fbs.toggle_range(4, 8);
-    * console.log(fbs.ones().collect())// [0, 1, 2, 3, 8, 9]
-    */
-    toggle_range(range: Range = new Range(0, this.#length)) {
-        // for (let i = range.start; i < range.end; i++) {
-        //     this.toggle_unchecked(i);
-        // }
-
-        for (const [block, mask] of new Masks(range, this.#length)) {
-            this.#data[block] ^= mask;
-        }
-    }
-
-    as_slice(): number[] {
-        return this.#data;
-    }
-
-    ones(): DoubleEndedIterator<number> {
-        const opt = split_first(this.as_slice());
-        if (opt) {
-            const [firstblock, _rem] = opt
-            const [lastblock, rem] = split_last(_rem) ?? [0, _rem]
-            return new Ones(
-                firstblock,
-                lastblock,
-                0,
-                (1 + rem.length) * BITS,
-                iter(rem)
-            )
-        } else {
-            return new Ones(
-                0,
-                0,
-                0,
-                0,
-                iter([])
-            );
-        }
-    }
-
-    zeroes() {
-        const opt = split_first(this.as_slice());
-        if (opt) {
-            const [firstblock, rem] = opt;
-
-            return new Zeroes(
-                ~firstblock,
-                0,
-                this.#length,
-                iter(rem)
-            )
-
-        } else {
-            return new Zeroes(
-                ~0,
-                0,
-                this.#length,
-                iter([])
-            );
-        }
-    }
 
     intersection(other: FixedBitSet): DoubleEndedIterator<number> {
         return new Intersection(this.ones(), other)
@@ -529,13 +520,13 @@ export class FixedBitSet {
      * 'self's capacity will remain the same
      */
     intersect_with(other: FixedBitSet) {
-        const l = this.#data.length;
+        const l = this.#blocks.length;
         for (let i = 0; i < l; i++) {
-            this.#data[i] &= other.#data[i];
+            this.#blocks[i] &= other.#blocks[i];
         }
-        let mn = Math.min(this.#data.length, other.#data.length);
-        for (let i = mn; i < this.#data.length; i++) {
-            this.#data[i] = 0;
+        let mn = Math.min(this.#blocks.length, other.#blocks.length);
+        for (let i = mn; i < this.#blocks.length; i++) {
+            this.#blocks[i] = 0;
         }
     }
 
@@ -553,7 +544,7 @@ export class FixedBitSet {
         }
         for (let i = 0; i < this.len(); i++) {
             const y = other.as_slice()[i];
-            this.#data[i] |= y
+            this.#blocks[i] |= y
         }
     }
 
@@ -566,9 +557,9 @@ export class FixedBitSet {
      * 'self's capacity will remain the same
      */
     difference_with(other: FixedBitSet) {
-        const l = this.#data.length;
+        const l = this.#blocks.length;
         for (let i = 0; i < l; i++) {
-            this.#data[i] &= ~other.#data[i] as unknown as number;
+            this.#blocks[i] &= ~other.#blocks[i] as unknown as number;
         }
     }
 
@@ -583,24 +574,24 @@ export class FixedBitSet {
         if (other.len() >= this.len()) {
             this.grow(other.len())
         }
-        const m = Math.max(this.#data.length, other.#data.length)
+        const m = Math.max(this.#blocks.length, other.#blocks.length)
         for (let i = 0; i < m; i++) {
-            this.#data[i] ^= other.#data[i];
+            this.#blocks[i] ^= other.#blocks[i];
         }
     }
 
-    // returns 'true' if 'self' has no elements in common with 'other' 
+    // returns 'true' if 'self' has no elements in common with 'other'
     is_disjoint(other: FixedBitSet): boolean {
-        return iter(this.#data)
+        return iter(this.#blocks)
             .zip(iter(other.as_slice()))
             .all(([x, y]) => (x & y) === 0)
     }
 
     is_subset(other: FixedBitSet): boolean {
-        return iter(this.#data)
+        return iter(this.#blocks)
             .zip(iter(other.as_slice()))
             .all(([x, y]) => (x & ~y) === 0)
-            && iter(this.#data).skip(other.as_slice().length).all(x => x === 0)
+            && iter(this.#blocks).skip(other.as_slice().length).all(x => x === 0)
     }
 
     is_superset(other: FixedBitSet) {
@@ -625,91 +616,93 @@ export class FixedBitSet {
     [Symbol.iterator]() {
         return this.ones();
     }
+
+
+    #get_unchecked(subblock: number) {
+        return this.#blocks[subblock];
+    }
+
+    #set_unchecked(subblock: number, bits: number) {
+        this.#blocks[subblock] = bits;
+    }
+
+    #batch_count_ones(from: number, to: number) {
+        const start = from;
+        const end = to;
+        assert(start <= end && end <= this.#length, `Invalid range ${start}..${end} for a fixedbitset of size ${this.#length}`)
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        let ones_count = 0;
+
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+            let b = this.#get_unchecked(block) & mask;
+            ones_count += count_ones(b);
+        }
+        return ones_count;
+    }
+
+    #batch_count_zeroes(from: number, to: number) {
+        const start = from;
+        const end = to;
+        assert(start <= end && end <= this.#length, `Invalid range ${start}..${end} for a fixedbitset of size ${this.#length}`)
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        let ones_count = 0;
+
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+            let b = ~this.#get_unchecked(block) & mask;
+            ones_count += count_ones(b);
+        }
+        return ones_count;
+    }
+
+
+
 }
-
-class Difference extends DoubleEndedIterator<number> {
-    #iter: DoubleEndedIterator<number>;
-    #other: FixedBitSet;
-    constructor(iter: DoubleEndedIterator<number>, other: FixedBitSet) {
-        super()
-        this.#iter = iter;
-        this.#other = other;
-    }
-
-    clone() {
-        return new Difference(this.#iter.clone(), this.#other.clone());
-    }
-
-    override into_iter(): DoubleEndedIterator<number> {
-        this.#iter.into_iter();
-        return this
-    }
-
-    override next(): IteratorResult<number> {
-        const f = this.#iter.find(nxt => !this.#other.contains(nxt));
-        return is_some(f) ? item(f) : done();
-    }
-
-    next_back(): IteratorResult<number, any> {
-        const n = this.#iter.next_back();
-        return (!n.done && !this.#other.contains(n.value)) ?
-            item(n.value) : done();
-    }
-}
-
-class Intersection extends DoubleEndedIterator<number> {
-    #iter: DoubleEndedIterator<number>;
-    #other: FixedBitSet;
-    constructor(iter: DoubleEndedIterator<number>, other: FixedBitSet) {
-        super()
-        this.#iter = iter;
-        this.#other = other
-    }
-
-    clone(): Intersection {
-        return new Intersection(this.#iter.clone(), this.#other.clone())
-    }
-
-    override into_iter(): DoubleEndedIterator<number> {
-        this.#iter.into_iter()
-        return this;
-    }
-
-    override next(): IteratorResult<number> {
-        const n = this.#iter.find(nxt => this.#other.contains(nxt));
-        return is_some(n) ? item(n) : done()
-    }
-
-    next_back(): IteratorResult<number, any> {
-        const n = this.#iter.rfind(nxt => this.#other.contains(nxt));
-        return is_some(n) ? item(n) : done()
-    }
-}
-
-class Union extends DoubleEndedIterator<number> {
-    #iter: DoubleEndedIterator<number>;
-    constructor(iter: DoubleEndedIterator<number>) {
-        super();
-        this.#iter = iter;
-    }
-
-    clone(): Union {
-        return new Union(this.#iter.clone());
-    }
-
-    override into_iter(): DoubleEndedIterator<number> {
-        this.#iter.into_iter()
-        return this;
-    }
-    override next(): IteratorResult<number> {
-        return this.#iter.next();
-    }
-
-    next_back(): IteratorResult<number, any> {
-        return this.#iter.next_back();
-    }
-}
-
 class Ones extends DoubleEndedIterator<number> {
     #bitset_front: number;
     #bitset_back: number;
@@ -789,6 +782,10 @@ class Ones extends DoubleEndedIterator<number> {
         return item(position)
     }
 
+    size_hint(): [number, Option<number>] {
+        return [0, this.#block_idx_back - this.#block_idx_front + 2 * BITS]
+    }
+
     #last_positive_bit_and_unset(n: number): [new_number: number, bit_idx: number] {
         const last_bit = n & -n;
         const position = trailing_zeros(last_bit);
@@ -801,7 +798,6 @@ class Ones extends DoubleEndedIterator<number> {
         const mask = ~((1) << (BITS - bit_idx - 1))
         return [n &= mask, bit_idx];
     }
-
 }
 
 class Zeroes extends Iterator<number> {
@@ -826,19 +822,16 @@ class Zeroes extends Iterator<number> {
         while (this.#bitset === 0) {
             const n = this.#remaining_blocks.next();
             if (n.done) return done();
-            // TODO: this is a workaround for ~n.value
             this.#bitset = ~n.value;
-            // this.#bitset = Math.min(~n.value, -1);
-            // this.#bitset = -1;
             this.#block_idx += BITS;
         }
 
-        const t = this.#bitset & u32.wrapping_sub(0, this.#bitset);
-
+        const t = this.#bitset & (0 - this.#bitset);
         const r = trailing_zeros(this.#bitset);
         this.#bitset ^= t;
 
         const bit = this.#block_idx + r;
+
         if (bit < this.#len) {
             return item(bit)
         }
@@ -846,70 +839,122 @@ class Zeroes extends Iterator<number> {
         return done();
     }
 
+    size_hint(): [number, Option<number>] {
+        return [0, this.#len]
+    }
 }
 
-class Masks extends Iterator<[number, number]> {
-    #first_block: number;
-    #first_mask: number;
-    #last_block: number;
-    #last_mask: number;
 
-    constructor(range: Range, len: number) {
-        super();
-        const start = range.start ?? 0;
-        const end = range.end ?? len;
-
-        assert(start <= end && end <= len);
-
-        const [first_block, first_rem] = div_rem(start, BITS);
-        const [last_block, last_rem] = div_rem(end, BITS)
-
-        this.#first_block = first_block;
-        this.#first_mask = u32.MAX << first_rem;
-        this.#last_block = last_block;
-        // this.#last_mask = Math.floor(u32.MAX / 2) >> (BITS - last_rem - 1)
-        this.#last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem - 1)
+class Difference extends DoubleEndedIterator<number> {
+    #iter: DoubleEndedIterator<number>;
+    #other: FixedBitSet;
+    constructor(iter: DoubleEndedIterator<number>, other: FixedBitSet) {
+        super()
+        this.#iter = iter;
+        this.#other = other;
     }
 
-    into_iter(): Iterator<[number, number]> {
-        return this;
+    clone() {
+        return new Difference(this.#iter.clone(), this.#other.clone());
     }
 
-    next(): IteratorResult<[number, number]> {
-        if (this.#first_block < this.#last_block) {
-            const res = [this.#first_block, this.#first_mask] as [number, number];
-            this.#first_block += 1;
-            this.#first_mask = ~0;
-            return item(res)
+    override into_iter(): DoubleEndedIterator<number> {
+        this.#iter.into_iter();
+        return this
+    }
 
-
-        } else if (this.#first_block === this.#last_block) {
-            const mask = this.#first_mask & this.#last_mask;
-            const res = mask === 0 ? done() : item([this.#first_block, mask])
-            this.#first_block += 1;
-            return res as IteratorResult<[number, number]>
-        } else {
-            return done();
-        }
-
+    override next(): IteratorResult<number> {
+        const f = this.#iter.find(nxt => !this.#other.contains(nxt));
+        return is_some(f) ? item(f) : done();
     }
 
     size_hint(): [number, Option<number>] {
-        return range(this.#first_block, this.#last_block + 1).size_hint()
+        return this.#iter.size_hint();
+    }
+
+    next_back(): IteratorResult<number, any> {
+        const n = this.#iter.next_back();
+        return (!n.done && !this.#other.contains(n.value)) ?
+            item(n.value) : done();
     }
 
 }
 
-function split_first<T>(array: T[]): Option<[T, T[]]> {
+class Intersection extends DoubleEndedIterator<number> {
+    #iter: DoubleEndedIterator<number>;
+    #other: FixedBitSet;
+    constructor(iter: DoubleEndedIterator<number>, other: FixedBitSet) {
+        super()
+        this.#iter = iter;
+        this.#other = other
+    }
+
+    clone(): Intersection {
+        return new Intersection(this.#iter.clone(), this.#other.clone())
+    }
+
+    override into_iter(): DoubleEndedIterator<number> {
+        this.#iter.into_iter()
+        return this;
+    }
+
+    override next(): IteratorResult<number> {
+        const n = this.#iter.find(nxt => this.#other.contains(nxt));
+        return is_some(n) ? item(n) : done()
+    }
+
+    size_hint(): [number, Option<number>] {
+        return this.#iter.size_hint()
+    }
+
+    next_back(): IteratorResult<number, any> {
+        const n = this.#iter.rfind(nxt => this.#other.contains(nxt));
+        return is_some(n) ? item(n) : done()
+    }
+
+}
+
+class Union extends DoubleEndedIterator<number> {
+    #iter: DoubleEndedIterator<number>;
+    constructor(iter: DoubleEndedIterator<number>) {
+        super();
+        this.#iter = iter;
+    }
+
+    clone(): Union {
+        return new Union(this.#iter.clone());
+    }
+
+    override into_iter(): DoubleEndedIterator<number> {
+        this.#iter.into_iter()
+        return this;
+    }
+    override next(): IteratorResult<number> {
+        return this.#iter.next();
+    }
+
+    next_back(): IteratorResult<number, any> {
+        return this.#iter.next_back();
+    }
+
+    size_hint(): [number, Option<number>] {
+        return this.#iter.size_hint()
+    }
+
+}
+
+type AnyArray = Array<number> | Uint8Array | Uint16Array | Uint32Array;
+
+function split_first<A extends AnyArray>(array: A): Option<[number, A]> {
     if (array.length > 0) {
-        return [array[0], array.slice(1, array.length)]
+        return [array[0], array.slice(1, array.length) as A]
     }
     return;
 }
 
-function split_last<T>(array: T[]): Option<[T, T[]]> {
+function split_last<A extends AnyArray>(array: A): Option<[number, A]> {
     if (array.length > 0) {
-        return [array[array.length - 1], array.slice(0, array.length - 1)]
+        return [array[array.length - 1], array.slice(0, array.length - 1) as A]
     }
     return;
 }
