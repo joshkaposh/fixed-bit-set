@@ -39,6 +39,19 @@ export class FixedBitSet {
         return new FixedBitSet(Uint32Array.from(blocks), length);
     }
 
+    static from_iter(src: IterInputType<number>) {
+        const fbs = FixedBitSet.with_capacity(0);
+        fbs.extend(src);
+        return fbs;
+    }
+
+    static from_array(src: number[]) {
+        const fbs = FixedBitSet.with_capacity(0);
+        fbs.extend_from_array(src);
+        return fbs;
+    }
+
+
     static default() {
         return FixedBitSet.with_capacity(0);
     }
@@ -509,6 +522,17 @@ export class FixedBitSet {
             this.put(i);
         }
     }
+
+    extend_from_array(src: number[]) {
+        for (let index = 0; index < src.length; index++) {
+            const i = src[index];
+            if (i >= this.len()) {
+                this.grow(i + 1)
+            }
+            this.put(i);
+        }
+    }
+
 
 
     intersection(other: FixedBitSet): DoubleEndedIterator<number> {
