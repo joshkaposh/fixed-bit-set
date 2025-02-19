@@ -69,14 +69,10 @@ export class FixedBitSet {
             this.#grow_inner(src.len());
         }
 
-        const me = this.#length;
-        const them = src.#length;
+        // const me = this.#length;
+        // const them = src.#length;
 
-        if (me > them) {
-            this.#blocks = structuredClone(src.#blocks);
-        } else if (me === them) {
-            this.#blocks.set(src.#blocks)
-        }
+        this.#blocks = structuredClone(src.#blocks);
 
         this.#length = src.#length;
     }
