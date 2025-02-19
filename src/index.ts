@@ -29,8 +29,7 @@ export class FixedBitSet {
     static with_capacity_and_blocks(bits: number, blocks: IterInputType<number>) {
         const bitset = this.with_capacity(bits);
         for (const [subblock, value] of iter(bitset.as_slice()).zip(blocks)) {
-            // @ts-expect-error
-            bitset.#set_unchecked(subblock, value)
+            bitset.#set_unchecked(subblock, value as number)
         }
         return bitset;
     }
@@ -57,12 +56,29 @@ export class FixedBitSet {
     }
 
     clone() {
-        return new FixedBitSet(structuredClone(this.#blocks as Uint32Array<ArrayBuffer>), this.#length)
+        return FixedBitSet.from_blocks_and_len(Array.from(this.as_slice()), this.#length)
     }
 
-    clone_from(other: FixedBitSet) {
-        this.#blocks = structuredClone(other.#blocks);
-        this.#length = other.#length;
+    /**
+     * Performs copy-assigment from `src`.
+     * 
+     * `a.clone_from(b)` is equivalent to `a = b.clone()` in functionality.
+     */
+    clone_from(src: FixedBitSet) {
+        if (this.len() < src.len()) {
+            this.#grow_inner(src.len());
+        }
+
+        const me = this.#length;
+        const them = src.#length;
+
+        if (me > them) {
+            this.#blocks = structuredClone(src.#blocks);
+        } else if (me === them) {
+            this.#blocks.set(src.#blocks)
+        }
+
+        this.#length = src.#length;
     }
 
     as_slice() {
@@ -74,12 +90,8 @@ export class FixedBitSet {
      * Does nothing if `bits` is less than current amount of bits in the bitset.
      */
     grow(bits: number) {
-        function do_grow(fbs: FixedBitSet, bits: number) {
-            fbs.#grow_inner(bits)
-        }
         if (bits > this.#length) {
-            do_grow(this, bits)
-
+            this.#grow_inner(bits)
         }
     }
 
@@ -510,12 +522,10 @@ export class FixedBitSet {
      * Checks if `this` and `other`'s bits exactly equal each other.
      */
     eq(other: FixedBitSet) {
-        for (let i = 0; i < this.#blocks.length; i++) {
-            if (!is_some(other.#blocks[i]) || this.#blocks[i] !== other.#blocks[i]) {
-                return false;
-            }
+        if (this.len() !== other.len()) {
+            return false;
         }
-        return true
+        return this.#blocks.every((b, i) => b === other.#blocks[i])
     }
 
     extend(src: IterInputType<number>) {

@@ -10,6 +10,31 @@ function time(label: string, fn: () => void) {
     console.timeEnd(label);
 }
 
+test('clone_from', () => {
+    const fbs = FixedBitSet.with_capacity(100);
+    const cloned = FixedBitSet.with_capacity(5);
+    console.log(fbs.as_slice(), cloned.as_slice());
+
+    fbs.insert(5);
+
+    fbs.insert(10);
+
+    fbs.insert(7);
+
+    fbs.clone_from(cloned);
+
+    assert(fbs.eq(cloned));
+})
+
+test('eq', () => {
+    const fbs = FixedBitSet.with_capacity(100);
+
+    const other = fbs.clone();
+
+    assert(fbs.eq(other));
+    expect(fbs).toEqual(other);
+})
+
 test('insert_range', () => {
     const fbs_a = FixedBitSet.with_capacity(1_000_000);
     console.time('insert_range a');
