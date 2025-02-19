@@ -60,6 +60,11 @@ export class FixedBitSet {
         return new FixedBitSet(structuredClone(this.#blocks as Uint32Array<ArrayBuffer>), this.#length)
     }
 
+    clone_from(other: FixedBitSet) {
+        this.#blocks = structuredClone(other.#blocks);
+        this.#length = other.#length;
+    }
+
     as_slice() {
         return this.#blocks;
     }
@@ -532,8 +537,6 @@ export class FixedBitSet {
             this.put(i);
         }
     }
-
-
 
     intersection(other: FixedBitSet): DoubleEndedIterator<number> {
         return new Intersection(this.ones(), other)
