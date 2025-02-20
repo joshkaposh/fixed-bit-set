@@ -14,7 +14,7 @@ function div_rem(x: number, d: number): [number, number] {
 export class FixedBitSet {
     #blocks: Uint32Array;
     #length: number;
-    constructor(blocks = new Uint32Array(), length = 0) {
+    private constructor(blocks = new Uint32Array(), length = 0) {
         this.#blocks = blocks;
         this.#length = length;
     }
@@ -28,8 +28,13 @@ export class FixedBitSet {
 
     static with_capacity_and_blocks(bits: number, blocks: IterInputType<number>) {
         const bitset = this.with_capacity(bits);
-        for (const [subblock, value] of iter(bitset.as_slice()).zip(blocks)) {
-            bitset.#set_unchecked(subblock, value as number)
+
+        const blocks_iter = iter(blocks);
+        const inner_blocks = bitset.#blocks;
+
+        for (let i = 0; i < inner_blocks.length; i++) {
+            const value = blocks_iter.next().value;
+            inner_blocks[i] = value;
         }
         return bitset;
     }
@@ -50,13 +55,45 @@ export class FixedBitSet {
         return fbs;
     }
 
-
     static default() {
         return FixedBitSet.with_capacity(0);
     }
 
+
+    /**
+     * @returns the total number of bits this bitset has.
+     */
+    get length() {
+        return this.#length
+    }
+
+    /**
+     * Sets the total length of the bitset to `bits`.
+     */
+    set length(bits) {
+        if (bits >= 0) {
+            this.#grow_inner(bits);
+        }
+    }
+
+    get block_length(): number {
+        let [blocks, rem] = div_rem(this.#length, BITS)
+        return blocks += Number(rem > 0);
+    }
+
+    toArray() {
+        return Array.from(this.#blocks);
+    }
+
+    /**
+     * Checks if `this` and `other`'s bits exactly equal each other.
+     */
+    eq(other: FixedBitSet) {
+        return this.#blocks.every((b, i) => b === other.#blocks[i])
+    }
+
     clone() {
-        return FixedBitSet.from_blocks_and_len(Array.from(this.as_slice()), this.#length)
+        return FixedBitSet.from_blocks_and_len(Array.from(this.#blocks), this.#length)
     }
 
     /**
@@ -65,8 +102,8 @@ export class FixedBitSet {
      * `a.clone_from(b)` is equivalent to `a = b.clone()` in functionality.
      */
     clone_from(src: FixedBitSet) {
-        if (this.len() < src.len()) {
-            this.#grow_inner(src.len());
+        if (this.#length < src.#length) {
+            this.#grow_inner(src.#length);
         }
 
         // const me = this.#length;
@@ -77,9 +114,6 @@ export class FixedBitSet {
         this.#length = src.#length;
     }
 
-    as_slice() {
-        return this.#blocks;
-    }
 
     /**
      * Resizes the bitset to the given amount of bits.
@@ -91,34 +125,30 @@ export class FixedBitSet {
         }
     }
 
+    /**
+     * Grows the internal size of the bitset before inserting a bit.
+     * 
+     * Unlike `insert()`, this cannot throw, but may allocate if the bit is outside of the existing buffer's range.
+     * 
+     * This is faster than calling `grow()` then `insert()` in succession.
+     */
     grow_insert(bits: number) {
         this.grow(bits + 1);
-        const [blocks, rem] = div_rem(bits, BITS)
-        let b = this.#get_unchecked(blocks);
-        b |= 1 << rem;
-        this.#set_unchecked(blocks, b)
+        const [block, rem] = div_rem(bits, BITS)
+        this.#blocks[block] |= 1 << rem;
     }
 
     #grow_inner(bits: number) {
         let [blocks, rem] = div_rem(bits, BITS);
         blocks += Number(rem > 0);
-        if (this.#blocks.length < blocks) {
-            const buf = new ArrayBuffer(this.#blocks.length, { maxByteLength: BITS * blocks })
-            buf.resize(blocks * U32_COUNT);
-            const arr = new Uint32Array(buf);
-            arr.set(this.#blocks);
-            this.#blocks = arr;
-            this.#length = bits;
-        }
-    }
-
-    len() {
-        return this.#length
-    }
-
-    block_len(): number {
-        let [blocks, rem] = div_rem(this.#length, BITS)
-        return blocks += Number(rem > 0);
+        // if (this.#blocks.length < bits) {
+        const buf = new ArrayBuffer(this.#blocks.length, { maxByteLength: BITS * blocks })
+        buf.resize(blocks * U32_COUNT);
+        const arr = new Uint32Array(buf);
+        arr.set(this.#blocks);
+        this.#blocks = arr;
+        this.#length = bits;
+        // }
     }
 
     /**
@@ -148,10 +178,19 @@ export class FixedBitSet {
         return this.contains_all_in_range();
     }
 
+    /**
+     * Clears the bitset, setting all bits to 0.
+     * 
+     * This does not change the bitset length.
+     */
     clear() {
-        this.#blocks.fill(0, 0, this.#blocks.length);
+        this.#blocks.fill(0);
     }
 
+    /**
+     * @returns the number of ones set in this FixBitSet
+     * @throws if `from >= to` and if `to > length`.
+     */
     count_ones(from = 0, to = this.#length) {
         return this.#batch_count_ones(from, to);
     }
@@ -189,9 +228,7 @@ export class FixedBitSet {
                 break;
             }
             const [block, mask] = res;
-            let b = this.#get_unchecked(block);
-            b |= mask;
-            this.#set_unchecked(block, b);
+            this.#blocks[block] |= mask;
         }
     }
 
@@ -224,10 +261,7 @@ export class FixedBitSet {
                 break;
             }
             const [block, mask] = res;
-            let b = this.#get_unchecked(block);
-            b &= ~mask;
-            this.#set_unchecked(block, b);
-
+            this.#blocks[block] &= ~mask;
         }
     }
 
@@ -260,9 +294,7 @@ export class FixedBitSet {
                 break;
             }
             const [block, mask] = res;
-            let b = this.#get_unchecked(block);
-            b ^= mask;
-            this.#set_unchecked(block, b);
+            this.#blocks[block] ^= mask;
         }
     }
 
@@ -274,8 +306,13 @@ export class FixedBitSet {
         }
     }
 
+    /**
+     * Enable `bit`
+     * 
+     * @throws if `bit >= length`
+     */
     insert(bit: number) {
-        assert(bit < this.#length);
+        assert(bit < this.#length, `Cannot insert bit ${bit} >= FixedBitSet length ${this.#length}`);
         this.insert_unchecked(bit);
     }
 
@@ -284,6 +321,10 @@ export class FixedBitSet {
         this.#blocks[block] |= 1 << i;
     }
 
+    /**
+     * 
+     * @returns true if the `bit` is enabled.
+     */
     contains(bit: number) {
         if (bit < this.#length) {
             return this.contains_unchecked(bit)
@@ -293,9 +334,12 @@ export class FixedBitSet {
 
     contains_unchecked(bit: number) {
         const [block, i] = div_rem(bit, BITS)
-        return (this.#get_unchecked(block) & (1 << i)) !== 0;
+        return (this.#blocks[block] & (1 << i)) !== 0;
     }
 
+    /**
+     * @returns true if fixedbitset has **any** bits set in the given range.
+     */
     contains_any_in_range(from = 0, to = this.#length) {
         const start = from;
         const end = to;
@@ -325,8 +369,7 @@ export class FixedBitSet {
                 break;
             }
             const [block, mask] = res;
-            let b = this.#get_unchecked(block);
-            if ((b & mask) !== 0) {
+            if ((this.#blocks[block] & mask) !== 0) {
                 return true
             }
         }
@@ -334,6 +377,9 @@ export class FixedBitSet {
         return false;
     }
 
+    /**
+     * @returns true if fixedbitset has **all** bits set in the given range.
+     */
     contains_all_in_range(from = 0, to = this.#length) {
         const start = from;
         const end = to;
@@ -363,69 +409,90 @@ export class FixedBitSet {
                 break;
             }
             const [block, mask] = res;
-            let b = this.#get_unchecked(block);
-            if ((b & mask) !== mask) {
+            if ((this.#blocks[block] & mask) !== mask) {
                 return false
             }
         }
         return true;
     }
 
+    /**
+     * Sets the bit at the index `bit`, to `0`, if it exists.
+     * 
+     * @throws if `bit >= length`.
+     */
     remove(bit: number) {
-        assert(bit < this.#length)
+        assert(bit < this.#length, `Cannot remove bit ${bit} >= FixedBitSet length ${this.#length}`)
         this.remove_unchecked(bit);
     }
 
     remove_unchecked(bit: number) {
-        const [block, i] = div_rem(bit, BITS)
-        this.#set_unchecked(block, block & ~(1 << i))
+        const [block, i] = div_rem(bit, BITS);
+        this.#blocks[block] &= ~(1 << i);
     }
 
+    /**
+     * @returns true if there was a `bit` present before inserting `bit`.
+     * 
+     * @throws if `bit >= length`
+     */
     put(bit: number): boolean {
-        assert(bit < this.#length);
+        assert(bit < this.#length, `put at index ${bit} exceeds fixedbitset size ${this.#length}`);
         return this.put_unchecked(bit);
     }
 
     put_unchecked(bit: number): boolean {
-        const [block, i] = div_rem(bit, BITS)
-        let word = this.#get_unchecked(block);
+        const [block, i] = div_rem(bit, BITS);
+
+        let word = this.#blocks[block];
         const prev = (word & (1 << i)) !== 0;
         word |= 1 << i;
-        this.#set_unchecked(block, word);
+        this.#blocks[block] = word;
         return prev;
 
     }
 
+    /**
+     * Toggle `bit`, inverting its state.
+     * 
+     * @throws if `bit >= length`.
+     */
     toggle(bit: number) {
-        assert(bit < this.#length)
+        assert(bit < this.#length, `toggle at index ${bit} exceeds fixedbitset size ${this.#length}`);
         this.toggle_unchecked(bit)
     }
 
     toggle_unchecked(bit: number) {
         const [block, i] = div_rem(bit, BITS);
-        let b = this.#get_unchecked(block);
-        b ^= 1 << i;
-        this.#set_unchecked(block, b)
+        this.#blocks[block] ^= 1 << i;
     }
 
+    /**
+     * sets the bit to the provided `enabled` value.
+     * 
+     * @throws if `bit >= length`.
+     */
     set(bit: number, enabled: 0 | 1 | boolean) {
-        assert(bit < this.#length)
+        assert(bit < this.#length, `set at index ${bit} exceeds fixedbitset size ${this.#length}`);
         this.set_unchecked(bit, enabled);
     }
 
     set_unchecked(bit: number, enabled: 0 | 1 | boolean) {
         const [block, i] = div_rem(bit, BITS)
-        let elt = this.#get_unchecked(block);
+        let elt = this.#blocks[block];
         if (enabled) {
             elt |= 1 << i;
         } else {
             elt &= ~(1 << i);
         }
-        this.#set_unchecked(block, elt);
+        this.#blocks[block] = elt;
     }
 
+    /**
+     * Copies the bit at index `from` to the index `to`.
+     */
     copy_bit(from: number, to: number) {
-        assert(to < this.#length)
+        assert(to < this.#length, `copy to index ${to} exceeds fixedbitset size ${this.#length}`);
         const enabled = this.contains(from);
         this.set_unchecked(to, enabled);
     }
@@ -436,7 +503,7 @@ export class FixedBitSet {
     }
 
     ones() {
-        const first = split_first(this.as_slice());
+        const first = split_first(this.#blocks);
         if (first) {
             const [first_block, rem_] = first;
             const [last_block, rem] = split_last(rem_) ?? [0, rem_]
@@ -465,69 +532,105 @@ export class FixedBitSet {
             return new Zeroes(
                 ~block,
                 0,
-                this.len(),
+                this.length,
                 iter(rem)
             )
         } else {
             return new Zeroes(
                 ~0,
                 0,
-                this.len(),
+                this.length,
                 iter([])
             )
         }
     }
 
+
+    /**
+     * Performs an immutable bitwise and between `this` and `other`
+     * 
+     * @returns a new `FixedBitSet`
+     */
     and(other: FixedBitSet) {
-        const l = other.len()
-        for (let i = 0; i < l; i++) {
-            if (!is_some(this.#blocks[i])) {
-                break;
-            }
-            this.#blocks[i] &= other.#blocks[i]
+        const [short, long] = this.#length <= other.#length ? [this.#blocks, other.#blocks] : [other.#blocks, this.#blocks];
+
+        const data = Array.from(short);
+
+        for (let i = 0; i < data.length; i++) {
+            data[i] &= long[i];
         }
+
+        return FixedBitSet.from_blocks_and_len(data, Math.max(this.#length, other.#length))
+    }
+
+
+    /**
+     * Performs an in-place bitwise and between `this`  and `other`.
+     * 
+     * @returns the same `FixedBitset` this method was called with
+     */
+    and_with(other: FixedBitSet) {
+        this.intersect_with(other);
+        return this;
+    }
+
+
+    /**
+     * Performs an immutable bitwise or between `this` and `other`
+     * 
+     * @returns a new `FixedBitSet`
+     */
+    or(other: FixedBitSet) {
+        const [short, long] = this.#length <= other.#length ? [this.#blocks, other.#blocks] : [other.#blocks, this.#blocks]
+
+        const data = Array.from(long);
+        for (let i = 0; i < data.length; i++) {
+            data[i] |= short[i];
+        }
+
+        return FixedBitSet.from_blocks_and_len(data, Math.max(this.#length, other.#length));
     }
 
     /**
      * Performs an in-place bitwise or between `this`  and `other`.
+     * 
+     * @returns the same `FixedBitset` this method was called with
      */
-    or(other: FixedBitSet) {
-        const len = other.len()
-        if (this.#blocks.length < len) {
-            this.grow(len);
+    or_with(other: FixedBitSet) {
+        this.union_with(other);
+        return this;
+    }
+
+
+    /**
+     * Performs an immutable bitwise xor between `this` and `other`
+     * 
+     * @returns a new `FixedBitSet`
+     */
+    xor(other: FixedBitSet) {
+        const [short, long] = this.#length <= other.#length ? [this.#blocks, other.#blocks] : [other.#blocks, this.#blocks];
+        const data = Array.from(long);
+        for (let i = 0; i < data.length; i++) {
+            data[i] ^= short[i];
         }
-        for (let i = 0; i < len; i++) {
-            this.#blocks[i] |= other.#blocks[i]
-        }
+
+        return FixedBitSet.from_blocks_and_len(data, Math.max(this.#length, other.#length));
     }
 
     /**
      * Performs an in-place bitwise xor between `this`  and `other`.
+     * 
+     * @returns the same `FixedBitset` this method was called with
      */
-    xor(other: FixedBitSet) {
-        const len = other.len()
-        if (this.#blocks.length < len) {
-            this.grow(len);
-        }
-        for (let i = 0; i < len; i++) {
-            this.#blocks[i] ^= other.#blocks[i]
-        }
-    }
-
-    /**
-     * Checks if `this` and `other`'s bits exactly equal each other.
-     */
-    eq(other: FixedBitSet) {
-        if (this.len() !== other.len()) {
-            return false;
-        }
-        return this.#blocks.every((b, i) => b === other.#blocks[i])
+    xor_with(other: FixedBitSet) {
+        this.symmetric_difference_with(other);
+        return this;
     }
 
     extend(src: IterInputType<number>) {
-        const it = iter(src)
+        const it = iter(src);
         for (const i of it) {
-            if (i >= this.len()) {
+            if (i >= this.#length) {
                 this.grow(i + 1)
             }
             this.put(i);
@@ -537,7 +640,7 @@ export class FixedBitSet {
     extend_from_array(src: number[]) {
         for (let index = 0; index < src.length; index++) {
             const i = src[index];
-            if (i >= this.len()) {
+            if (i >= this.#length) {
                 this.grow(i + 1)
             }
             this.put(i);
@@ -568,15 +671,22 @@ export class FixedBitSet {
      * is equal to the ones that both A and B contain
      */
     union(other: FixedBitSet) {
-        return new Union(this.ones().chain(other.difference(this)))
+        return this.ones().chain(other.difference(this));
+        // return new Union(this.ones().chain(other.difference(this)))
     }
 
+    /**
+     * In-place union of two `FixedBitSet`s
+     * 
+     * This method mutates the `FixedBitSet` that `union_with` is called on.
+     */
     union_with(other: FixedBitSet) {
-        if (other.len() >= this.len()) {
-            this.grow(other.len())
+        if (other.#length >= this.#length) {
+            this.grow(other.#length)
         }
-        for (let i = 0; i < this.len(); i++) {
-            const y = other.as_slice()[i];
+
+        for (let i = 0; i < this.#length; i++) {
+            const y = other.#blocks[i];
             this.#blocks[i] |= y
         }
     }
@@ -596,7 +706,6 @@ export class FixedBitSet {
         }
     }
 
-
     symmetric_difference(other: FixedBitSet) {
         return this.difference(other).chain(other.difference(this))
     }
@@ -604,8 +713,8 @@ export class FixedBitSet {
     // in-place symmetric difference of two 'FixedBitSet's;
     // 'self's capacity may be increased to match 'other's
     symmetric_difference_with(other: FixedBitSet) {
-        if (other.len() >= this.len()) {
-            this.grow(other.len())
+        if (other.#length >= this.#length) {
+            this.grow(other.#length)
         }
         const m = Math.max(this.#blocks.length, other.#blocks.length)
         for (let i = 0; i < m; i++) {
@@ -613,18 +722,184 @@ export class FixedBitSet {
         }
     }
 
+    union_count(other: FixedBitSet) {
+        const start = 0;
+        const end = this.#length;
+
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        let count = 0;
+        let from = 0;
+        let to = this.#length;
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+
+            count += count_ones((this.#blocks[block] & mask) | (other.#blocks[block] & mask))
+        }
+
+
+        return count;
+
+    }
+
+    intersection_count(other: FixedBitSet) {
+        const start = 0;
+        const end = this.#length;
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+
+        let count = 0;
+        let from = 0;
+        let to = this.#length;
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+            count += count_ones((this.#blocks[block] & mask) & (other.#blocks[block] & mask));
+        }
+        return count;
+    }
+
+    difference_count(other: FixedBitSet) {
+        const start = 0;
+        const end = this.#length;
+
+        let count = 0;
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+
+        let from = 0;
+        let to = this.#length;
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+
+            count += count_ones((this.#blocks[block] & mask) & ~(other.#blocks[block] & mask))
+        }
+
+        return count;
+    }
+
+    symmetric_difference_count(other: FixedBitSet) {
+        const start = 0;
+        const end = this.#length;
+
+        const [first_block_, first_rem_] = div_rem(start, BITS)
+        const [last_block_, last_rem_] = div_rem(end, BITS)
+
+        let first_block = first_block_;
+        let first_mask = u32.MAX << first_rem_;
+        let last_block = last_block_;
+        let last_mask = (u32.MAX >>> 1) >>> (BITS - last_rem_ - 1)
+
+        let count = 0;
+        let from = 0;
+        let to = this.#length;
+
+        for (let i = from; i < to; i++) {
+            let res: [number, number];
+            if (first_block < last_block) {
+                res = [first_block, first_mask] as [number, number];
+                first_block += 1;
+                first_mask = ~0;
+            } else if (first_block === last_block) {
+                const mask = first_mask & last_mask;
+                if (mask === 0) {
+                    break;
+                }
+                res = [first_block, mask]
+                first_block += 1;
+            } else {
+                break;
+            }
+            const [block, mask] = res;
+
+            count += count_ones((this.#blocks[block] & mask) ^ (other.#blocks[block] & mask))
+        }
+
+        if (other.#length > this.#length) {
+            console.log('>');
+            return count + other.#batch_count_ones(this.#length)
+        } else if (other.#length < this.#length) {
+            return count + this.#batch_count_ones(other.#length)
+        } else {
+            console.log('===');
+            return count;
+        }
+    }
+
     // returns 'true' if 'self' has no elements in common with 'other'
     is_disjoint(other: FixedBitSet): boolean {
         return iter(this.#blocks)
-            .zip(iter(other.as_slice()))
+            .zip(iter(other.#blocks))
             .all(([x, y]) => (x & y) === 0)
     }
 
     is_subset(other: FixedBitSet): boolean {
         return iter(this.#blocks)
-            .zip(iter(other.as_slice()))
+            .zip(iter(other.#blocks))
             .all(([x, y]) => (x & ~y) === 0)
-            && iter(this.#blocks).skip(other.as_slice().length).all(x => x === 0)
+            && iter(this.#blocks).skip(other.#blocks.length).all(x => x === 0)
     }
 
     is_superset(other: FixedBitSet) {
@@ -633,33 +908,32 @@ export class FixedBitSet {
 
     format(type: 'b' | '#b' = 'b') {
         let bstring = type === '#b' ? '0b' : '';
-        for (let i = 0; i < this.len(); i++) {
-            bstring += Number(this.contains(i)) * 1;
+        for (let i = 0; i < this.#length; i++) {
+            bstring += Number(this.contains(i));
         }
         return bstring;
     }
 
     toString(type?: '#') {
-        if (!type) {
-            return this.format()
-        }
-        return this.format('#b')
+        const ty = !type ? 'b' : '#b';
+        return this.format(ty)
+    }
+
+    [Symbol.toStringTag]() {
+        return this.toString();
+    }
+
+    [Symbol.toPrimitive]() {
+        return this.toString();
     }
 
     [Symbol.iterator]() {
         return this.ones();
     }
 
-
-    #get_unchecked(subblock: number) {
-        return this.#blocks[subblock];
-    }
-
-    #set_unchecked(subblock: number, bits: number) {
-        this.#blocks[subblock] = bits;
-    }
-
-    #batch_count_ones(from: number, to: number) {
+    #batch_count_ones(from?: number, to?: number) {
+        from ??= 0
+        to ??= this.#length;
         const start = from;
         const end = to;
         assert(start <= end && end <= this.#length, `Invalid range ${start}..${end} for a fixedbitset of size ${this.#length}`)
@@ -690,8 +964,7 @@ export class FixedBitSet {
                 break;
             }
             const [block, mask] = res;
-            let b = this.#get_unchecked(block) & mask;
-            ones_count += count_ones(b);
+            ones_count += count_ones(this.#blocks[block] & mask);
         }
         return ones_count;
     }
@@ -727,15 +1000,12 @@ export class FixedBitSet {
                 break;
             }
             const [block, mask] = res;
-            let b = ~this.#get_unchecked(block) & mask;
-            ones_count += count_ones(b);
+            ones_count += count_ones(~this.#blocks[block] & mask);
         }
         return ones_count;
     }
-
-
-
 }
+
 class Ones extends DoubleEndedIterator<number> {
     #bitset_front: number;
     #bitset_back: number;
@@ -877,7 +1147,6 @@ class Zeroes extends Iterator<number> {
     }
 }
 
-
 class Difference extends DoubleEndedIterator<number> {
     #iter: DoubleEndedIterator<number>;
     #other: FixedBitSet;
@@ -933,7 +1202,7 @@ class Intersection extends DoubleEndedIterator<number> {
 
     override next(): IteratorResult<number> {
         const n = this.#iter.find(nxt => this.#other.contains(nxt));
-        return is_some(n) ? item(n) : done()
+        return n != null ? item(n) : done();
     }
 
     size_hint(): [number, Option<number>] {
@@ -941,40 +1210,40 @@ class Intersection extends DoubleEndedIterator<number> {
     }
 
     next_back(): IteratorResult<number, any> {
-        const n = this.#iter.rfind(nxt => this.#other.contains(nxt));
-        return is_some(n) ? item(n) : done()
+        const n = this.#iter.rev().find(nxt => this.#other.contains(nxt));
+        return n != null ? item(n) : done();
     }
 
 }
 
-class Union extends DoubleEndedIterator<number> {
-    #iter: DoubleEndedIterator<number>;
-    constructor(iter: DoubleEndedIterator<number>) {
-        super();
-        this.#iter = iter;
-    }
+// class Union extends DoubleEndedIterator<number> {
+//     #iter: DoubleEndedIterator<number>;
+//     constructor(iter: DoubleEndedIterator<number>) {
+//         super();
+//         this.#iter = iter;
+//     }
 
-    clone(): Union {
-        return new Union(this.#iter.clone());
-    }
+//     clone(): Union {
+//         return new Union(this.#iter.clone());
+//     }
 
-    override into_iter(): DoubleEndedIterator<number> {
-        this.#iter.into_iter()
-        return this;
-    }
-    override next(): IteratorResult<number> {
-        return this.#iter.next();
-    }
+//     override into_iter(): DoubleEndedIterator<number> {
+//         this.#iter.into_iter()
+//         return this;
+//     }
+//     override next(): IteratorResult<number> {
+//         return this.#iter.next();
+//     }
 
-    next_back(): IteratorResult<number, any> {
-        return this.#iter.next_back();
-    }
+//     next_back(): IteratorResult<number, any> {
+//         return this.#iter.next_back();
+//     }
 
-    size_hint(): [number, Option<number>] {
-        return this.#iter.size_hint()
-    }
+//     size_hint(): [number, Option<number>] {
+//         return this.#iter.size_hint()
+//     }
 
-}
+// }
 
 type AnyArray = Array<number> | Uint8Array | Uint16Array | Uint32Array;
 
